@@ -13,7 +13,7 @@ import (
 
 func TestFormatTokens(t *testing.T) {
 	tests := []struct {
-		input int
+		input int64
 		want  string
 	}{
 		{0, "0"},
@@ -48,8 +48,8 @@ func TestShortModelName(t *testing.T) {
 		{"claude-haiku-4.5", "haiku-4.5"},
 		{"gpt-5.4", "gpt-5.4"},
 		{"unknown", "unknown"},
-		// name longer than 10 chars after stripping prefix
-		{"claude-very-long-model-name", "very-long-"},
+		// name longer than 12 chars after stripping prefix
+		{"claude-very-long-model-name", "very-long-mo"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -133,8 +133,14 @@ func TestPeriodLabelInvalidKey(t *testing.T) {
 
 func TestSortedModels(t *testing.T) {
 	data := []PeriodData{
-		{Label: "d1", Total: 100, ByModel: map[string]int{"model-a": 30, "model-b": 70}},
-		{Label: "d2", Total: 200, ByModel: map[string]int{"model-a": 150, "model-c": 50}},
+		{Label: "d1", ByModel: map[string]*ModelMetrics{
+			"model-a": {OutputTokens: 30},
+			"model-b": {OutputTokens: 70},
+		}},
+		{Label: "d2", ByModel: map[string]*ModelMetrics{
+			"model-a": {OutputTokens: 150},
+			"model-c": {OutputTokens: 50},
+		}},
 	}
 	got := sortedModels(data)
 	// model-a: 180, model-b: 70, model-c: 50 → order: a, b, c
@@ -158,7 +164,7 @@ func TestSortedModelsEmpty(t *testing.T) {
 
 func TestSortedModelsNoByModel(t *testing.T) {
 	data := []PeriodData{
-		{Label: "d1", Total: 100, ByModel: map[string]int{}},
+		{Label: "d1", ByModel: map[string]*ModelMetrics{}},
 	}
 	got := sortedModels(data)
 	if len(got) != 0 {
@@ -168,26 +174,31 @@ func TestSortedModelsNoByModel(t *testing.T) {
 
 // ─── aggregate ───────────────────────────────────────────────────────────────
 
-func makeRecord(daysAgo int, tokens int, model string) TokenRecord {
-	return TokenRecord{
-		Time:   time.Now().AddDate(0, 0, -daysAgo),
-		Tokens: tokens,
-		Model:  model,
+func makeSessionAt(ts time.Time, outputTokens int64, model string) *SessionRecord {
+	return &SessionRecord{
+		Time: ts,
+		Models: map[string]ModelMetrics{
+			model: {OutputTokens: outputTokens},
+		},
 	}
 }
 
+func makeSessionDaysAgo(daysAgo int, outputTokens int64, model string) *SessionRecord {
+	return makeSessionAt(time.Now().AddDate(0, 0, -daysAgo), outputTokens, model)
+}
+
 func TestAggregateDay(t *testing.T) {
-	records := []TokenRecord{
-		makeRecord(0, 100, "model-a"), // today
-		makeRecord(1, 200, "model-a"), // yesterday
-		makeRecord(29, 50, "model-b"), // 29 days ago — within 30-day window
-		makeRecord(31, 999, "model-b"), // 31 days ago — outside window
+	records := []*SessionRecord{
+		makeSessionDaysAgo(0, 100, "model-a"),  // today
+		makeSessionDaysAgo(1, 200, "model-a"),  // yesterday
+		makeSessionDaysAgo(29, 50, "model-b"),  // 29 days ago — within 30-day window
+		makeSessionDaysAgo(31, 999, "model-b"), // 31 days ago — outside window
 	}
 	data := aggregateAt(records, "day", 30, false, time.Now())
 	// Should have 3 days (today, yesterday, 29 days ago), not the 31-days-ago record
-	totalTokens := 0
+	var totalTokens int64
 	for _, pd := range data {
-		totalTokens += pd.Total
+		totalTokens += pd.OutputTokens
 	}
 	if totalTokens != 350 {
 		t.Errorf("day aggregate total = %d, want 350", totalTokens)
@@ -196,15 +207,15 @@ func TestAggregateDay(t *testing.T) {
 
 func TestAggregateDayCutoffExclusion(t *testing.T) {
 	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
-	records := []TokenRecord{
-		{Time: now.AddDate(0, 0, -5), Tokens: 100, Model: "m"},  // within window
-		{Time: now.AddDate(0, 0, -15), Tokens: 200, Model: "m"}, // within window
-		{Time: now.AddDate(0, 0, -35), Tokens: 999, Model: "m"}, // outside 30-day window
+	records := []*SessionRecord{
+		makeSessionAt(now.AddDate(0, 0, -5), 100, "m"),  // within window
+		makeSessionAt(now.AddDate(0, 0, -15), 200, "m"), // within window
+		makeSessionAt(now.AddDate(0, 0, -35), 999, "m"), // outside 30-day window
 	}
 	data := aggregateAt(records, "day", 30, false, now)
-	total := 0
+	var total int64
 	for _, pd := range data {
-		total += pd.Total
+		total += pd.OutputTokens
 	}
 	if total != 300 {
 		t.Errorf("expected 300 tokens (filtered), got %d", total)
@@ -214,69 +225,69 @@ func TestAggregateDayCutoffExclusion(t *testing.T) {
 func TestAggregateWeekGrouping(t *testing.T) {
 	// Two records in same week, one in a different week
 	base := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC) // Monday week 16
-	records := []TokenRecord{
-		{Time: base, Tokens: 100, Model: "m"},                          // Mon week 16
-		{Time: base.AddDate(0, 0, 4), Tokens: 200, Model: "m"},         // Fri week 16
-		{Time: base.AddDate(0, 0, 7), Tokens: 50, Model: "m"},          // Mon week 17
+	records := []*SessionRecord{
+		makeSessionAt(base, 100, "m"),                          // Mon week 16
+		makeSessionAt(base.AddDate(0, 0, 4), 200, "m"),         // Fri week 16
+		makeSessionAt(base.AddDate(0, 0, 7), 50, "m"),          // Mon week 17
 	}
 	data := aggregateAt(records, "week", 60, false, base.AddDate(0, 0, 14))
 	if len(data) != 2 {
 		t.Fatalf("expected 2 week buckets, got %d", len(data))
 	}
 	// First bucket: week 16 = 300 tokens
-	if data[0].Total != 300 {
-		t.Errorf("week 16 total = %d, want 300", data[0].Total)
+	if data[0].OutputTokens != 300 {
+		t.Errorf("week 16 total = %d, want 300", data[0].OutputTokens)
 	}
 	// Second bucket: week 17 = 50 tokens
-	if data[1].Total != 50 {
-		t.Errorf("week 17 total = %d, want 50", data[1].Total)
+	if data[1].OutputTokens != 50 {
+		t.Errorf("week 17 total = %d, want 50", data[1].OutputTokens)
 	}
 }
 
 func TestAggregateMonthGrouping(t *testing.T) {
-	records := []TokenRecord{
-		{Time: time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC), Tokens: 100, Model: "m"},
-		{Time: time.Date(2026, 3, 28, 0, 0, 0, 0, time.UTC), Tokens: 200, Model: "m"},
-		{Time: time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC), Tokens: 50, Model: "m"},
+	records := []*SessionRecord{
+		makeSessionAt(time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC), 100, "m"),
+		makeSessionAt(time.Date(2026, 3, 28, 0, 0, 0, 0, time.UTC), 200, "m"),
+		makeSessionAt(time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC), 50, "m"),
 	}
 	now := time.Date(2026, 4, 17, 0, 0, 0, 0, time.UTC)
 	data := aggregateAt(records, "month", 365, false, now)
 	if len(data) != 2 {
 		t.Fatalf("expected 2 month buckets, got %d", len(data))
 	}
-	if data[0].Total != 300 {
-		t.Errorf("Mar 2026 total = %d, want 300", data[0].Total)
+	if data[0].OutputTokens != 300 {
+		t.Errorf("Mar 2026 total = %d, want 300", data[0].OutputTokens)
 	}
-	if data[1].Total != 50 {
-		t.Errorf("Apr 2026 total = %d, want 50", data[1].Total)
+	if data[1].OutputTokens != 50 {
+		t.Errorf("Apr 2026 total = %d, want 50", data[1].OutputTokens)
 	}
 }
 
 func TestAggregateModelSplit(t *testing.T) {
 	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
-	records := []TokenRecord{
-		{Time: now.AddDate(0, 0, -1), Tokens: 300, Model: "model-a"},
-		{Time: now.AddDate(0, 0, -1), Tokens: 100, Model: "model-b"},
-		{Time: now.AddDate(0, 0, -2), Tokens: 500, Model: "model-a"},
+	records := []*SessionRecord{
+		makeSessionAt(now.AddDate(0, 0, -1), 300, "model-a"),
+		makeSessionAt(now.AddDate(0, 0, -1), 100, "model-b"),
+		makeSessionAt(now.AddDate(0, 0, -2), 500, "model-a"),
 	}
 	data := aggregateAt(records, "day", 30, true, now)
 
-	// Find the day-1 bucket
+	// Find the day-1 bucket (should have output=400)
 	var day1 *PeriodData
 	for i := range data {
-		if data[i].Total == 400 {
+		if data[i].OutputTokens == 400 {
 			day1 = &data[i]
 			break
 		}
 	}
 	if day1 == nil {
-		t.Fatal("could not find day-1 bucket with total 400")
+		t.Fatal("could not find day-1 bucket with OutputTokens=400")
 	}
-	if day1.ByModel["model-a"] != 300 {
-		t.Errorf("model-a = %d, want 300", day1.ByModel["model-a"])
+	if day1.ByModel["model-a"] == nil || day1.ByModel["model-a"].OutputTokens != 300 {
+		t.Errorf("model-a = %v, want OutputTokens=300", day1.ByModel["model-a"])
 	}
-	if day1.ByModel["model-b"] != 100 {
-		t.Errorf("model-b = %d, want 100", day1.ByModel["model-b"])
+	if day1.ByModel["model-b"] == nil || day1.ByModel["model-b"].OutputTokens != 100 {
+		t.Errorf("model-b = %v, want OutputTokens=100", day1.ByModel["model-b"])
 	}
 }
 
@@ -289,10 +300,10 @@ func TestAggregateEmptyRecords(t *testing.T) {
 
 func TestAggregateResultsAreSortedByKey(t *testing.T) {
 	now := time.Date(2026, 4, 17, 0, 0, 0, 0, time.UTC)
-	records := []TokenRecord{
-		{Time: time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC), Tokens: 10, Model: "m"},
-		{Time: time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC), Tokens: 20, Model: "m"},
-		{Time: time.Date(2026, 4, 17, 0, 0, 0, 0, time.UTC), Tokens: 30, Model: "m"},
+	records := []*SessionRecord{
+		makeSessionAt(time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC), 10, "m"),
+		makeSessionAt(time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC), 20, "m"),
+		makeSessionAt(time.Date(2026, 4, 17, 0, 0, 0, 0, time.UTC), 30, "m"),
 	}
 	data := aggregateAt(records, "day", 30, false, now)
 	for i := 1; i < len(data); i++ {
@@ -302,19 +313,59 @@ func TestAggregateResultsAreSortedByKey(t *testing.T) {
 	}
 }
 
+// ─── aggregateByModel ────────────────────────────────────────────────────────
+
+func TestAggregateByModel(t *testing.T) {
+	now := time.Date(2026, 4, 17, 0, 0, 0, 0, time.UTC)
+	records := []*SessionRecord{
+		{
+			Time: now,
+			Models: map[string]ModelMetrics{
+				"model-a": {InputTokens: 100, OutputTokens: 50, Requests: 2},
+				"model-b": {InputTokens: 200, OutputTokens: 80, Requests: 3},
+			},
+		},
+		{
+			Time: now.AddDate(0, 0, -1),
+			Models: map[string]ModelMetrics{
+				"model-a": {InputTokens: 50, OutputTokens: 25, Requests: 1},
+			},
+		},
+	}
+	totals := aggregateByModel(records)
+
+	if totals["model-a"] == nil {
+		t.Fatal("model-a missing from aggregateByModel result")
+	}
+	if totals["model-a"].InputTokens != 150 {
+		t.Errorf("model-a InputTokens = %d, want 150", totals["model-a"].InputTokens)
+	}
+	if totals["model-a"].OutputTokens != 75 {
+		t.Errorf("model-a OutputTokens = %d, want 75", totals["model-a"].OutputTokens)
+	}
+	if totals["model-a"].Requests != 3 {
+		t.Errorf("model-a Requests = %d, want 3", totals["model-a"].Requests)
+	}
+	if totals["model-b"] == nil {
+		t.Fatal("model-b missing from aggregateByModel result")
+	}
+	if totals["model-b"].OutputTokens != 80 {
+		t.Errorf("model-b OutputTokens = %d, want 80", totals["model-b"].OutputTokens)
+	}
+}
+
 // ─── buildModelBar ────────────────────────────────────────────────────────────
 
 func TestBuildModelBarEmpty(t *testing.T) {
-	pd := PeriodData{Total: 0, ByModel: map[string]int{}}
+	pd := PeriodData{OutputTokens: 0, ByModel: map[string]*ModelMetrics{}}
 	got := buildModelBar(pd, []string{"m"}, 10)
-	// strip ANSI for comparison
 	if stripANSI(got) != "" {
 		t.Errorf("expected empty bar for zero total, got %q", got)
 	}
 }
 
 func TestBuildModelBarZeroLength(t *testing.T) {
-	pd := PeriodData{Total: 100, ByModel: map[string]int{"m": 100}}
+	pd := PeriodData{OutputTokens: 100, ByModel: map[string]*ModelMetrics{"m": {OutputTokens: 100}}}
 	got := buildModelBar(pd, []string{"m"}, 0)
 	if stripANSI(got) != "" {
 		t.Errorf("expected empty bar for zero barLen, got %q", got)
@@ -322,7 +373,7 @@ func TestBuildModelBarZeroLength(t *testing.T) {
 }
 
 func TestBuildModelBarSingleModel(t *testing.T) {
-	pd := PeriodData{Total: 100, ByModel: map[string]int{"model-a": 100}}
+	pd := PeriodData{OutputTokens: 100, ByModel: map[string]*ModelMetrics{"model-a": {OutputTokens: 100}}}
 	got := buildModelBar(pd, []string{"model-a"}, 10)
 	plain := stripANSI(got)
 	// All 10 chars should be bar char for model-a (index 0 = "█")
@@ -334,14 +385,73 @@ func TestBuildModelBarSingleModel(t *testing.T) {
 func TestBuildModelBarTwoModels(t *testing.T) {
 	// 50/50 split across 10 chars → 5 each
 	pd := PeriodData{
-		Total:   100,
-		ByModel: map[string]int{"model-a": 50, "model-b": 50},
+		OutputTokens: 100,
+		ByModel: map[string]*ModelMetrics{
+			"model-a": {OutputTokens: 50},
+			"model-b": {OutputTokens: 50},
+		},
 	}
 	models := []string{"model-a", "model-b"}
 	got := buildModelBar(pd, models, 10)
 	plain := stripANSI(got)
 	if len([]rune(plain)) != 10 {
 		t.Errorf("bar length = %d, want 10", len([]rune(plain)))
+	}
+}
+
+// ─── buildTokenTypeBar ───────────────────────────────────────────────────────
+
+func TestBuildTokenTypeBarZeroTotal(t *testing.T) {
+	pd := PeriodData{}
+	got := buildTokenTypeBar(pd, 20)
+	if stripANSI(got) != "" {
+		t.Errorf("expected empty bar for zero total, got %q", got)
+	}
+}
+
+func TestBuildTokenTypeBarZeroLength(t *testing.T) {
+	pd := PeriodData{OutputTokens: 100}
+	got := buildTokenTypeBar(pd, 0)
+	if stripANSI(got) != "" {
+		t.Errorf("expected empty bar for zero length, got %q", got)
+	}
+}
+
+func TestBuildTokenTypeBarOutputOnly(t *testing.T) {
+	// Only output tokens → all █
+	pd := PeriodData{OutputTokens: 100}
+	got := buildTokenTypeBar(pd, 10)
+	plain := stripANSI(got)
+	if plain != strings.Repeat("█", 10) {
+		t.Errorf("output-only bar = %q, want 10x █", plain)
+	}
+}
+
+func TestBuildTokenTypeBarMixedTypes(t *testing.T) {
+	// Equal split: 100 out, 100 cache-read, 100 input → total 300 → 10 chars each in a 30-wide bar
+	pd := PeriodData{
+		OutputTokens:    100,
+		CacheReadTokens: 100,
+		InputTokens:     100,
+	}
+	got := buildTokenTypeBar(pd, 30)
+	plain := stripANSI(got)
+	if len([]rune(plain)) != 30 {
+		t.Errorf("mixed bar length = %d, want 30", len([]rune(plain)))
+	}
+	// Each segment should be 10 chars; check chars appear in expected order
+	runes := []rune(plain)
+	out := string(runes[0:10])
+	cache := string(runes[10:20])
+	in := string(runes[20:30])
+	if out != strings.Repeat("█", 10) {
+		t.Errorf("output segment = %q, want 10x █", out)
+	}
+	if cache != strings.Repeat("░", 10) {
+		t.Errorf("cache segment = %q, want 10x ░", cache)
+	}
+	if in != strings.Repeat("▒", 10) {
+		t.Errorf("input segment = %q, want 10x ▒", in)
 	}
 }
 
@@ -367,12 +477,12 @@ func TestParseSessionDirNoFile(t *testing.T) {
 
 func TestParseSessionDirEmpty(t *testing.T) {
 	dir := writeFixture(t, []string{})
-	records, err := parseSessionDir(dir)
+	rec, err := parseSessionDir(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(records) != 0 {
-		t.Errorf("expected 0 records, got %d", len(records))
+	if rec != nil {
+		t.Errorf("expected nil record for empty file, got %+v", rec)
 	}
 }
 
@@ -384,23 +494,19 @@ func TestParseSessionDirTokensNoModel(t *testing.T) {
 		`{"type":"assistant.message","data":{"messageId":"m2","outputTokens":250},"timestamp":"2026-04-10T10:02:00.000Z"}`,
 	}
 	dir := writeFixture(t, lines)
-	records, err := parseSessionDir(dir)
+	rec, err := parseSessionDir(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(records) != 2 {
-		t.Fatalf("expected 2 records, got %d", len(records))
+	if rec == nil {
+		t.Fatal("expected non-nil record")
 	}
-	for _, r := range records {
-		if r.Model != "unknown" {
-			t.Errorf("expected model 'unknown', got %q", r.Model)
-		}
+	mm, ok := rec.Models["unknown"]
+	if !ok {
+		t.Fatalf("expected model 'unknown' in record, got models: %v", rec.Models)
 	}
-	if records[0].Tokens != 150 {
-		t.Errorf("record[0].Tokens = %d, want 150", records[0].Tokens)
-	}
-	if records[1].Tokens != 250 {
-		t.Errorf("record[1].Tokens = %d, want 250", records[1].Tokens)
+	if mm.OutputTokens != 400 {
+		t.Errorf("unknown model OutputTokens = %d, want 400", mm.OutputTokens)
 	}
 }
 
@@ -413,18 +519,18 @@ func TestParseSessionDirModelAssignment(t *testing.T) {
 		`{"type":"assistant.message","data":{"messageId":"m2","outputTokens":200},"timestamp":"2026-04-10T10:03:00.000Z"}`,
 	}
 	dir := writeFixture(t, lines)
-	records, err := parseSessionDir(dir)
+	rec, err := parseSessionDir(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(records) != 2 {
-		t.Fatalf("expected 2 records, got %d", len(records))
+	if rec == nil {
+		t.Fatal("expected non-nil record")
 	}
-	if records[0].Model != "unknown" {
-		t.Errorf("before model change: got %q, want 'unknown'", records[0].Model)
+	if mm, ok := rec.Models["unknown"]; !ok || mm.OutputTokens != 100 {
+		t.Errorf("unknown model: %+v, want OutputTokens=100", rec.Models["unknown"])
 	}
-	if records[1].Model != "claude-sonnet-4.6" {
-		t.Errorf("after model change: got %q, want 'claude-sonnet-4.6'", records[1].Model)
+	if mm, ok := rec.Models["claude-sonnet-4.6"]; !ok || mm.OutputTokens != 200 {
+		t.Errorf("claude-sonnet-4.6 model: %+v, want OutputTokens=200", rec.Models["claude-sonnet-4.6"])
 	}
 }
 
@@ -438,17 +544,22 @@ func TestParseSessionDirMultipleModelChanges(t *testing.T) {
 		`{"type":"assistant.message","data":{"messageId":"m3","outputTokens":300},"timestamp":"2026-04-10T10:06:00.000Z"}`,
 	}
 	dir := writeFixture(t, lines)
-	records, err := parseSessionDir(dir)
+	rec, err := parseSessionDir(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(records) != 3 {
-		t.Fatalf("expected 3 records, got %d", len(records))
+	if rec == nil {
+		t.Fatal("expected non-nil record")
 	}
-	wantModels := []string{"model-a", "model-b", "model-c"}
-	for i, r := range records {
-		if r.Model != wantModels[i] {
-			t.Errorf("record[%d].Model = %q, want %q", i, r.Model, wantModels[i])
+	wantModels := map[string]int64{"model-a": 100, "model-b": 200, "model-c": 300}
+	for name, want := range wantModels {
+		mm, ok := rec.Models[name]
+		if !ok {
+			t.Errorf("model %q missing from record", name)
+			continue
+		}
+		if mm.OutputTokens != want {
+			t.Errorf("model %q OutputTokens = %d, want %d", name, mm.OutputTokens, want)
 		}
 	}
 }
@@ -460,13 +571,15 @@ func TestParseSessionDirSkipsZeroTokens(t *testing.T) {
 		`{"type":"assistant.message","data":{"messageId":"m3"},"timestamp":"2026-04-10T10:03:00.000Z"}`,
 	}
 	dir := writeFixture(t, lines)
-	records, err := parseSessionDir(dir)
+	rec, err := parseSessionDir(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Only the record with 100 tokens should appear
-	if len(records) != 1 {
-		t.Errorf("expected 1 record (skipping zeros/nil), got %d", len(records))
+	if rec == nil {
+		t.Fatal("expected non-nil record")
+	}
+	if rec.Models["unknown"].OutputTokens != 100 {
+		t.Errorf("expected 100 output tokens, got %d", rec.Models["unknown"].OutputTokens)
 	}
 }
 
@@ -476,12 +589,86 @@ func TestParseSessionDirSkipsMalformedLines(t *testing.T) {
 		`{"type":"assistant.message","data":{"outputTokens":50},"timestamp":"2026-04-10T10:01:00.000Z"}`,
 	}
 	dir := writeFixture(t, lines)
-	records, err := parseSessionDir(dir)
+	rec, err := parseSessionDir(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(records) != 1 {
-		t.Errorf("expected 1 record (skipping malformed), got %d", len(records))
+	if rec == nil {
+		t.Fatal("expected non-nil record")
+	}
+	if rec.Models["unknown"].OutputTokens != 50 {
+		t.Errorf("expected 50 output tokens, got %d", rec.Models["unknown"].OutputTokens)
+	}
+}
+
+func TestParseSessionDirWithShutdown(t *testing.T) {
+	lines := []string{
+		`{"type":"session.start","data":{"sessionId":"abc"},"timestamp":"2026-04-10T10:00:00.000Z"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"claude-sonnet-4.6":{"usage":{"inputTokens":1000,"outputTokens":500,"cacheReadTokens":2000,"cacheWriteTokens":100,"reasoningTokens":0},"requests":{"count":10,"cost":2}}},"codeChanges":{"linesAdded":50,"linesRemoved":20},"totalPremiumRequests":2},"timestamp":"2026-04-10T10:05:00.000Z"}`,
+	}
+	dir := writeFixture(t, lines)
+	rec, err := parseSessionDir(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("expected non-nil record")
+	}
+	if !rec.FromShutdown {
+		t.Error("expected FromShutdown=true")
+	}
+	mm, ok := rec.Models["claude-sonnet-4.6"]
+	if !ok {
+		t.Fatal("expected claude-sonnet-4.6 model in shutdown record")
+	}
+	if mm.InputTokens != 1000 {
+		t.Errorf("InputTokens = %d, want 1000", mm.InputTokens)
+	}
+	if mm.OutputTokens != 500 {
+		t.Errorf("OutputTokens = %d, want 500", mm.OutputTokens)
+	}
+	if mm.CacheReadTokens != 2000 {
+		t.Errorf("CacheReadTokens = %d, want 2000", mm.CacheReadTokens)
+	}
+	if mm.CacheWriteTokens != 100 {
+		t.Errorf("CacheWriteTokens = %d, want 100", mm.CacheWriteTokens)
+	}
+	if mm.Requests != 10 {
+		t.Errorf("Requests = %d, want 10", mm.Requests)
+	}
+	if mm.PremiumRequests != 2 {
+		t.Errorf("PremiumRequests = %d, want 2", mm.PremiumRequests)
+	}
+	if rec.LinesAdded != 50 {
+		t.Errorf("LinesAdded = %d, want 50", rec.LinesAdded)
+	}
+	if rec.LinesRemoved != 20 {
+		t.Errorf("LinesRemoved = %d, want 20", rec.LinesRemoved)
+	}
+}
+
+func TestParseSessionDirShutdownTakesPriority(t *testing.T) {
+	// Both shutdown event and assistant.message exist — shutdown should win
+	lines := []string{
+		`{"type":"assistant.message","data":{"outputTokens":9999},"timestamp":"2026-04-10T10:01:00.000Z"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"model-x":{"usage":{"outputTokens":42},"requests":{"count":1,"cost":0}}},"codeChanges":{}},"timestamp":"2026-04-10T10:05:00.000Z"}`,
+	}
+	dir := writeFixture(t, lines)
+	rec, err := parseSessionDir(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("expected non-nil record")
+	}
+	if !rec.FromShutdown {
+		t.Error("expected FromShutdown=true when shutdown event present")
+	}
+	if rec.Models["model-x"].OutputTokens != 42 {
+		t.Errorf("expected shutdown data (42 tokens), got %d", rec.Models["model-x"].OutputTokens)
+	}
+	if _, ok := rec.Models["unknown"]; ok {
+		t.Error("expected no 'unknown' model when shutdown data is used")
 	}
 }
 
@@ -501,7 +688,6 @@ func TestParseAllSessionsAggregatesMultiple(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create two session directories
 	for i, tokens := range []int{100, 200} {
 		dir := filepath.Join(stateDir, fmt.Sprintf("session-%d", i))
 		if err := os.Mkdir(dir, 0755); err != nil {
@@ -521,7 +707,7 @@ func TestParseAllSessionsAggregatesMultiple(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(records) != 2 {
-		t.Errorf("expected 2 records from 2 sessions, got %d", len(records))
+		t.Errorf("expected 2 session records from 2 sessions, got %d", len(records))
 	}
 }
 
