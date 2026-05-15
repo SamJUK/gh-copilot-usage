@@ -26,15 +26,15 @@ gh copilot-usage [flags]
 
 ### Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--period day\|week\|month` | `day` | Aggregation period |
-| `--days N` | `30` | Number of days to include (day/week mode) |
-| `--model` | false | Split token counts by model |
-| `--no-graph` | false | Skip bar chart, show table only |
-| `--no-table` | false | Skip table, show bar chart only |
-| `--copilot-dir PATH` | `~/.copilot` | Override the copilot data directory |
-| `--version` | — | Print version and exit |
+| Flag                        | Default      | Description                               |
+| --------------------------- | ------------ | ----------------------------------------- |
+| `--period day\|week\|month` | `day`        | Aggregation period                        |
+| `--days N`                  | `30`         | Number of days to include (day/week mode) |
+| `--model`                   | false        | Split token counts by model               |
+| `--no-graph`                | false        | Skip bar chart, show table only           |
+| `--no-table`                | false        | Skip table, show bar chart only           |
+| `--copilot-dir PATH`        | `~/.copilot` | Override the copilot data directory       |
+| `--version`                 | —            | Print version and exit                    |
 
 ### Examples
 
@@ -70,3 +70,5 @@ go build -o gh-copilot-usage .
 ```
 
 Requires Go 1.21+.
+
+![GH Copilot Usage](./.github/gh-copilot-usage.png)
